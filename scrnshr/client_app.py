@@ -10,14 +10,8 @@ from scrnshr.capture import KeyHook, clip_cursor, release_cursor_clip, set_curso
 from scrnshr.client_session import ClientSession
 from scrnshr.inputlogic import ForwardPolicy, PointerLockMath
 from scrnshr.netutil import DEFAULT_PORT, get_lan_ipv4s, parse_port, prepare_target
+from scrnshr.scope import CLIENT_NOTES, DEFERRED_SENTENCE
 from scrnshr.winutil import configure_root, enable_dpi_awareness, make_icon_image, place_window
-
-NOTES = (
-    "连接后会转发键盘和鼠标。Esc 释放光标，Ctrl+Alt+Q 断开连接。",
-    "请填写另一台电脑的地址，不要填写本机。",
-    "这一版不传画面、文件和剪贴板。",
-    "需要两边都手动打开，不会加入开机启动。",
-)
 
 _BUTTONS = {1: "left", 2: "middle", 3: "right"}
 
@@ -75,7 +69,7 @@ class ClientApp:
 
         ttk.Label(self.form, text="状态").pack(anchor="w", pady=(8, 0))
         ttk.Label(self.form, textvariable=self.status, wraplength=420, justify="left").pack(anchor="w", pady=(4, 12))
-        ttk.Label(self.form, text="\n".join(NOTES), wraplength=420, justify="left").pack(anchor="w")
+        ttk.Label(self.form, text="\n".join(CLIENT_NOTES), wraplength=420, justify="left").pack(anchor="w")
 
         self.capture = tk.Frame(self.root, bg="#1e2933")
         self.canvas = tk.Canvas(self.capture, bg="#1e2933", highlightthickness=0, cursor="crosshair")
@@ -238,7 +232,7 @@ class ClientApp:
             "光标已锁定在这个窗口里。\n"
             "Esc            释放光标，回到本机操作\n"
             "Ctrl+Alt+Q     断开连接\n\n"
-            "这一版只转发键盘和鼠标，不传画面、文件和剪贴板。"
+            f"{DEFERRED_SENTENCE}"
         )
         width = max(self.canvas.winfo_width(), 200)
         height = max(self.canvas.winfo_height(), 200)

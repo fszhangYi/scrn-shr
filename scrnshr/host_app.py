@@ -12,6 +12,7 @@ from scrnshr.errors import BindError
 from scrnshr.host_server import HostServer
 from scrnshr.inject import PynputInjector
 from scrnshr.netutil import DEFAULT_PORT, get_lan_ipv4s
+from scrnshr.scope import HOST_NOTES
 from scrnshr.winutil import configure_root, enable_dpi_awareness, make_icon_image, place_window
 
 DENY_TEXT = {
@@ -20,14 +21,6 @@ DENY_TEXT = {
     "busy": "已经有一个控制端连着，新的连接被拒绝。",
     "version": "对方版本和本程序不一致。",
 }
-
-NOTES = (
-    "关闭窗口后程序会留在托盘里，托盘菜单可以再次打开或退出。",
-    "需要两台电脑都手动打开，不会加入开机启动。",
-    "这一版只接收键盘和鼠标，不传画面、文件和剪贴板。",
-    "以当前登录用户运行即可，不需要管理员。UAC 提示和锁屏无法控制。",
-    "如果系统询问防火墙，请允许它在专用网络上接收连接。",
-)
 
 
 class HostApp:
@@ -108,7 +101,7 @@ class HostApp:
         ttk.Button(buttons, text="刷新地址", command=self._load_addresses).pack(side="left")
         ttk.Button(buttons, text="停止并退出", command=self.shutdown).pack(side="right")
 
-        ttk.Label(frame, text="\n".join(NOTES), wraplength=410, justify="left").pack(anchor="w", pady=(18, 0))
+        ttk.Label(frame, text="\n".join(HOST_NOTES), wraplength=410, justify="left").pack(anchor="w", pady=(18, 0))
 
     def run(self) -> None:
         self.root.mainloop()
