@@ -48,6 +48,10 @@ class HostServer:
         self._lock = threading.Lock()
         self._on_status = None
 
+    @property
+    def listening(self) -> bool:
+        return self._running
+
     def set_status_callback(self, callback) -> None:
         self._on_status = callback
 
