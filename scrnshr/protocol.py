@@ -20,6 +20,54 @@ def pack(message: dict) -> bytes:
     return _HEADER.pack(len(payload)) + payload
 
 
+_SCREEN_PREFIX = b"SCRN"
+_SCREEN_HEAD = struct.Struct("<BBIhhHHHHHHHH")
+
+
+def pack_screen(message: dict) -> bytes:
+    """画面走二进制，不再套 Base64。键鼠消息仍是 JSON，可以插在两帧之间。"""
+    jpg = message.get("jpg")
+    if isinstance(jpg, str):
+        import base64
+
+        jpg = base64.b64decode(jpg)
+    if not isinstance(jpg, (bytes, bytearray)) or not jpg:
+        raise ProtocolError("画面为空")
+    cropped = message.get("cx") is not None
+    body = _SCREEN_PREFIX + _SCREEN_HEAD.pack(
+        1 if cropped else 0,
+        0,
+        int(message.get("seq", 0)) & 0xFFFFFFFF,
+        int(message["ox"]),
+        int(message["oy"]),
+        int(message["sw"]),
+        int(message["sh"]),
+        int(message["w"]),
+        int(message["h"]),
+        int(message.get("cx", 0)),
+        int(message.get("cy", 0)),
+        int(message.get("cw", 0)),
+        int(message.get("ch", 0)),
+    ) + bytes(jpg)
+    if len(body) > MAX_MESSAGE:
+        raise ProtocolError("消息过长")
+    return _HEADER.pack(len(body)) + body
+
+
+def _unpack_screen(body: bytes) -> dict:
+    need = len(_SCREEN_PREFIX) + _SCREEN_HEAD.size
+    if len(body) < need or not body.startswith(_SCREEN_PREFIX):
+        raise ProtocolError("画面无法解析")
+    flags, _pad, seq, ox, oy, sw, sh, width, height, cx, cy, cw, ch = _SCREEN_HEAD.unpack_from(body, len(_SCREEN_PREFIX))
+    jpg = body[need:]
+    if not jpg or sw <= 0 or sh <= 0 or width <= 0 or height <= 0:
+        raise ProtocolError("画面无法解析")
+    message = {"t": "screen", "seq": seq, "ox": ox, "oy": oy, "sw": sw, "sh": sh, "w": width, "h": height, "jpg": jpg}
+    if flags & 1:
+        message.update(cx=cx, cy=cy, cw=cw, ch=ch)
+    return message
+
+
 def pop_message(buffer: bytearray) -> dict | None:
     if len(buffer) < _HEADER.size:
         return None
@@ -31,6 +79,8 @@ def pop_message(buffer: bytearray) -> dict | None:
         return None
     raw = bytes(buffer[_HEADER.size : total])
     del buffer[:total]
+    if raw.startswith(_SCREEN_PREFIX):
+        return _unpack_screen(raw)
     try:
         message = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

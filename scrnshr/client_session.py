@@ -17,6 +17,11 @@ class ClientSession:
         self._buf = bytearray()
         self._closed = True
         self._send_lock = threading.Lock()
+        self._inputs: list[dict] = []
+        self._abs: dict | None = None
+        self._writer_stop = False
+        self._writer: threading.Thread | None = None
+        self._input_cv = threading.Condition()
 
     def connect(self, host: str, port: int, password: str) -> None:
         host = host.strip()
@@ -49,6 +54,7 @@ class ClientSession:
         self._sock = sock
         self._buf = buffer
         self._closed = False
+        self._start_writer()
 
     def start_watch(self, on_message, on_closed) -> None:
         sock = self._sock
@@ -89,7 +95,52 @@ class ClientSession:
                 raise ConnectionClosed("连接已断开")
             send_msg(sock, message)
 
+    def send_input(self, message: dict) -> None:
+        """键鼠只入队。连续的鼠标移动只保留最新的一点，不堵住窗口。"""
+        with self._input_cv:
+            if self._closed:
+                return
+            if message.get("t") == "abs":
+                self._abs = message
+            else:
+                self._inputs.append(message)
+            self._input_cv.notify()
+
+    def _start_writer(self) -> None:
+        self._writer_stop = False
+        self._writer = threading.Thread(target=self._write_input, name="scrnshr-input", daemon=True)
+        self._writer.start()
+
+    def _write_input(self) -> None:
+        while True:
+            with self._input_cv:
+                while self._abs is None and not self._inputs and not self._writer_stop:
+                    self._input_cv.wait(0.2)
+                if self._writer_stop:
+                    return
+                absolute = self._abs
+                self._abs = None
+                batch = self._inputs
+                self._inputs = []
+            try:
+                if absolute is not None:
+                    self.send(absolute)
+                for item in batch:
+                    self.send(item)
+            except Exception:
+                return
+
+    def _stop_writer(self) -> None:
+        thread = self._writer
+        with self._input_cv:
+            self._writer_stop = True
+            self._input_cv.notify_all()
+        if thread is not None:
+            thread.join(timeout=1)
+            self._writer = None
+
     def close(self) -> None:
+        self._stop_writer()
         with self._send_lock:
             if self._closed:
                 return

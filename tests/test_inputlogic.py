@@ -17,6 +17,13 @@ class ForwardPolicyTests(unittest.TestCase):
         self.assertEqual(policy.decide({"kind": "key", "v": "esc"}, True), "unlock")
         self.assertEqual(policy.decide({"kind": "vk", "v": 0x1B}, True), "unlock")
 
+    def test_ctrl_alt_h_toggles_chrome_without_forwarding(self):
+        policy = ForwardPolicy()
+        policy.decide({"kind": "key", "v": "ctrl_l"}, True)
+        policy.decide({"kind": "vk", "v": 0xA4}, True)
+        self.assertEqual(policy.decide({"kind": "vk", "v": 0x48}, True), "chrome")
+        self.assertEqual(policy.decide({"kind": "char", "v": "h"}, True), "chrome")
+
     def test_plain_q_is_forwarded(self):
         policy = ForwardPolicy()
         self.assertEqual(policy.decide({"kind": "char", "v": "q"}, True), "forward")

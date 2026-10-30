@@ -84,6 +84,7 @@ class IncomingFiles:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self._open: dict[str, dict] = {}
+        self._clip_paths: list[Path] = []
 
     def handle(self, message: dict) -> str | None:
         kind = message.get("t")
@@ -116,7 +117,15 @@ class IncomingFiles:
             handle = path.open("wb")
         except (OSError, ValueError) as exc:
             return f"无法接收文件：{exc}"
-        self._open[transfer_id] = {"handle": handle, "path": path, "size": size, "got": 0, "next": 0, "name": name}
+        self._open[transfer_id] = {
+            "handle": handle,
+            "path": path,
+            "size": size,
+            "got": 0,
+            "next": 0,
+            "name": name,
+            "clip": message.get("clip") is True,
+        }
         return f"正在接收 {name}"
 
     def _chunk(self, transfer_id: str, message: dict) -> str | None:
@@ -157,7 +166,14 @@ class IncomingFiles:
         path = slot["path"]
         self._close_handle(slot)
         del self._open[transfer_id]
+        if slot.get("clip"):
+            self._clip_paths.append(path)
         return f"已保存 {path}"
+
+    def take_clip_paths(self) -> list[Path]:
+        paths = self._clip_paths
+        self._clip_paths = []
+        return paths
 
     def _discard(self, transfer_id: str) -> None:
         slot = self._open.pop(transfer_id, None)

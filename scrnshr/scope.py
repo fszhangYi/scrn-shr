@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SHARE_SENTENCE = "连接后会传输画面，并可以互传文件和剪贴板。"
+SHARE_SENTENCE = "连接后会传输画面，并可以互传文件和剪贴板。在资源管理器里复制文件后，另一台可以直接粘贴。"
 MANUAL_SENTENCE = "需要两边都手动打开，不会加入开机启动。"
 SAVE_SENTENCE = "收到的文件保存在“下载”文件夹的“局域网键鼠”目录里。"
 
@@ -17,7 +17,7 @@ HOST_NOTES = (
 
 CLIENT_NOTES = (
     "连接后显示对方画面，并尽量铺满窗口。在画面上移动和点击即可操作对方。",
-    "点「使用本机键盘」，或把窗口最小化，键盘就交还这台电脑。Esc 同样可以释放。Ctrl+Alt+Q 断开连接。",
+    "点「使用本机键盘」，或把窗口最小化，键盘就交还这台电脑。Esc 同样可以释放。Ctrl+Alt+H 隐藏或显示标题栏和工具条。Ctrl+Alt+Q 断开连接。",
     SHARE_SENTENCE,
     SAVE_SENTENCE,
     "请填写另一台电脑的地址，不要填写本机。",

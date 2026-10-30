@@ -22,6 +22,7 @@ class ViewGeometry:
     screen_h: int
     image_w: int
     image_h: int
+    crop: tuple[int, int, int, int] | None = None
 
 
 def fit_frame(image, max_edge: int = _MAX_EDGE):
@@ -41,9 +42,9 @@ def _jpeg_limit() -> int:
     return (MAX_MESSAGE - 512) * 3 // 4
 
 
-def _encode_jpeg(image, quality: int) -> bytes:
+def _encode_jpeg(image, quality: int, subsampling: int = 0) -> bytes:
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=quality, subsampling=0)
+    image.save(buffer, format="JPEG", quality=quality, subsampling=subsampling)
     return buffer.getvalue()
 
 
@@ -81,19 +82,88 @@ def encode_screen(image, origin_x: int, origin_y: int, screen_w: int, screen_h: 
     }
 
 
+def plan_frame(previous, image, origin_x: int, origin_y: int, screen_w: int, screen_h: int, seq: int, *, force_full: bool = False):
+    """相对上一帧只编码变化区域。没有变化时返回 None，调用方就不要占着发送。"""
+    frame = _fitted(image)
+    if previous is None or previous.size != frame.size:
+        return _binary_frame(frame, origin_x, origin_y, screen_w, screen_h, seq, 85, 0), frame
+    from PIL import ImageChops
+
+    box = ImageChops.difference(previous, frame).getbbox()
+    if box is None:
+        return None, previous
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    if force_full or area > frame.width * frame.height * 0.7:
+        quality, subsampling = (85, 0) if force_full else (70, 2)
+        return _binary_frame(frame, origin_x, origin_y, screen_w, screen_h, seq, quality, subsampling), frame
+    x0, y0, x1, y1 = _align_box(box, frame.width, frame.height)
+    crop = frame.crop((x0, y0, x1, y1))
+    message = _binary_frame(crop, origin_x, origin_y, screen_w, screen_h, seq, 75, 0 if area < frame.width * frame.height * 0.2 else 2)
+    message["w"] = frame.width
+    message["h"] = frame.height
+    message.update(cx=x0, cy=y0, cw=x1 - x0, ch=y1 - y0)
+    return message, frame
+
+
+def _fitted(image):
+    frame = image.convert("RGB")
+    if max(frame.width, frame.height) > _MAX_EDGE:
+        frame = fit_frame(frame, _MAX_EDGE)
+    return frame
+
+
+def _binary_frame(frame, origin_x: int, origin_y: int, screen_w: int, screen_h: int, seq: int, quality: int, subsampling: int) -> dict:
+    return {
+        "t": "screen",
+        "bin": True,
+        "seq": int(seq),
+        "ox": int(origin_x),
+        "oy": int(origin_y),
+        "sw": int(screen_w),
+        "sh": int(screen_h),
+        "w": frame.width,
+        "h": frame.height,
+        "jpg": _encode_jpeg(frame, quality, subsampling),
+    }
+
+
+def _align_box(box, width: int, height: int) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = box
+    x0 = max(0, x0 & ~15)
+    y0 = max(0, y0 & ~15)
+    x1 = min(width, (x1 + 15) & ~15)
+    y1 = min(height, (y1 + 15) & ~15)
+    if x1 <= x0 or y1 <= y0:
+        return 0, 0, width, height
+    return x0, y0, x1, y1
+
+
 def decode_screen(message: dict):
     if message.get("t") != "screen":
         raise ProtocolError("不是画面消息")
     try:
-        raw = base64.b64decode(message.get("jpg", ""), validate=True)
+        payload = message.get("jpg", b"")
+        if isinstance(payload, str):
+            raw = base64.b64decode(payload, validate=True)
+        elif isinstance(payload, (bytes, bytearray)):
+            raw = bytes(payload)
+        else:
+            raise ProtocolError("画面无法解析")
         image = _open_jpeg(raw)
+        crop = None
+        image_w, image_h = image.width, image.height
+        if message.get("cx") is not None:
+            crop = (_int_field(message, "cx"), _int_field(message, "cy"), _positive(message, "cw"), _positive(message, "ch"))
+            image_w = _positive(message, "w")
+            image_h = _positive(message, "h")
         geometry = ViewGeometry(
             origin_x=_int_field(message, "ox"),
             origin_y=_int_field(message, "oy"),
             screen_w=_positive(message, "sw"),
             screen_h=_positive(message, "sh"),
-            image_w=image.width,
-            image_h=image.height,
+            image_w=image_w,
+            image_h=image_h,
+            crop=crop,
         )
     except ProtocolError:
         raise

@@ -7,7 +7,7 @@ from PIL import Image
 
 from scrnshr.errors import ProtocolError
 from scrnshr.protocol import MAX_MESSAGE, pack
-from scrnshr.viewport import decode_screen, encode_screen, map_canvas_filled, map_canvas_to_screen
+from scrnshr.viewport import decode_screen, encode_screen, map_canvas_filled, map_canvas_to_screen, plan_frame
 
 
 class ViewportTests(unittest.TestCase):
@@ -51,6 +51,32 @@ class ViewportTests(unittest.TestCase):
         image = Image.frombytes("RGB", (1600, 900), os.urandom(1600 * 900 * 3))
         message = encode_screen(image, 0, 0, 1600, 900, 1)
         self.assertLessEqual(len(pack(message)), 4 + MAX_MESSAGE)
+
+    def test_unchanged_frame_is_not_sent(self):
+        image = Image.new("RGB", (64, 48), (10, 20, 30))
+        first, committed = plan_frame(None, image, 0, 0, 64, 48, 1)
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertNotIn("cx", first)
+        second, _same = plan_frame(committed, image, 0, 0, 64, 48, 2)
+        self.assertIsNone(second)
+
+    def test_small_change_is_a_crop(self):
+        base = Image.new("RGB", (64, 48), (10, 20, 30))
+        _full, committed = plan_frame(None, base, 0, 0, 64, 48, 1)
+        changed = base.copy()
+        for x in range(4):
+            for y in range(4):
+                changed.putpixel((x, y), (255, 0, 0))
+        message, _next = plan_frame(committed, changed, 0, 0, 64, 48, 2)
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertEqual(message["w"], 64)
+        self.assertLess(message["cw"], 64)
+        restored, geometry = decode_screen(message)
+        self.assertEqual(geometry.image_w, 64)
+        self.assertIsNotNone(geometry.crop)
+        self.assertEqual(restored.size, (geometry.crop[2], geometry.crop[3]))
 
     def test_rejects_a_non_jpeg_payload(self):
         with self.assertRaises(ProtocolError):

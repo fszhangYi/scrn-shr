@@ -19,7 +19,7 @@ echo 正在打包控制端。这台电脑需要 Python，生成的程序不需�
 "build\packvenv\Scripts\python.exe" pack\build_exe.py client
 if errorlevel 1 goto fail
 echo.
-echo 可以把 dist\局域网键鼠控制端.exe 复制到另一台 Windows 电脑上直接运行。
+echo 程序在 dist 目录，文件名带有打包时间。请复制上面打印的那个 exe。
 if not defined SCRNSHR_NO_PAUSE pause
 exit /b 0
 :fail

@@ -35,6 +35,7 @@ class ClientApp:
         self._photo = None
         self._pending = None
         self._frame_after = None
+        self._chrome_visible = True
 
         self.root = tk.Tk()
         configure_root(self.root)
@@ -81,13 +82,14 @@ class ClientApp:
         ttk.Label(self.form, text="\n".join(CLIENT_NOTES), wraplength=420, justify="left").pack(anchor="w")
 
         self.capture = tk.Frame(self.root, bg="#1e2933")
-        bar = ttk.Frame(self.capture, padding=(8, 6))
-        bar.pack(fill="x")
-        self.key_button = ttk.Button(bar, text="使用本机键盘", command=self._toggle_keys)
+        self.bar = ttk.Frame(self.capture, padding=(8, 6))
+        self.bar.pack(fill="x")
+        self.key_button = ttk.Button(self.bar, text="使用本机键盘", command=self._toggle_keys)
         self.key_button.pack(side="left")
-        ttk.Button(bar, text="发送文件", command=self._send_file).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="断开", command=self._disconnect).pack(side="right")
-        ttk.Label(bar, textvariable=self.view_status).pack(side="left", padx=12)
+        ttk.Button(self.bar, text="发送文件", command=self._send_file).pack(side="left", padx=(8, 0))
+        ttk.Button(self.bar, text="隐藏边框", command=self._toggle_chrome).pack(side="left", padx=(8, 0))
+        ttk.Button(self.bar, text="断开", command=self._disconnect).pack(side="right")
+        ttk.Label(self.bar, textvariable=self.view_status).pack(side="left", padx=12)
 
         self.canvas = tk.Canvas(self.capture, bg="#1e2933", highlightthickness=0, cursor="arrow")
         self.canvas.pack(fill="both", expand=True)
@@ -212,8 +214,12 @@ class ClientApp:
         pending = self._pending
         self._pending = None
         if pending is not None:
-            self._remote_image, self._geo = pending
-            self._redraw()
+            image, geometry = pending
+            merged = _paste_frame(self._remote_image, image, geometry)
+            if merged is not None:
+                self._remote_image = merged
+                self._geo = geometry
+                self._redraw()
         self._schedule_frame(generation)
 
     def _cancel_frame(self) -> None:
@@ -228,7 +234,7 @@ class ClientApp:
 
     def _schedule_frame(self, generation: int) -> None:
         try:
-            self._frame_after = self.root.after(50, lambda: self._pull_frame(generation))
+            self._frame_after = self.root.after(30, lambda: self._pull_frame(generation))
         except tk.TclError:
             pass
 
@@ -249,7 +255,7 @@ class ClientApp:
             self.key_button.configure(text="控制对方键盘")
             return
         self._locked = True
-        self.view_status.set("正在转发键盘和鼠标。最小化或点「使用本机键盘」可交还键盘。")
+        self.view_status.set("正在转发键盘和鼠标。Ctrl+Alt+H 隐藏边框，最小化或点「使用本机键盘」交还键盘。")
         self.key_button.configure(text="使用本机键盘")
 
     def _toggle_keys(self) -> None:
@@ -270,6 +276,8 @@ class ClientApp:
         self.root.bind("<Escape>", self._escape_backup)
         self.root.bind("<Control-Alt-q>", self._disconnect_backup)
         self.root.bind("<Control-Alt-Q>", self._disconnect_backup)
+        self.root.bind("<Control-Alt-h>", self._toggle_chrome)
+        self.root.bind("<Control-Alt-H>", self._toggle_chrome)
         self.root.bind("<Unmap>", self._on_unmap)
         try:
             self.canvas.focus_set()
@@ -307,7 +315,7 @@ class ClientApp:
         self.canvas.create_text(
             width / 2,
             height / 2,
-            text="正在接收对方画面…\n\n在画面上移动和点击即可操作对方。\n最小化或点「使用本机键盘」交还键盘，Ctrl+Alt+Q 断开。",
+            text="正在接收对方画面…\n\n在画面上移动和点击即可操作对方。\nCtrl+Alt+H 隐藏标题栏和工具条。\n最小化或点「使用本机键盘」交还键盘，Ctrl+Alt+Q 断开。",
             fill="white",
             font=("Microsoft YaHei UI", 14),
             justify="center",
@@ -352,7 +360,7 @@ class ClientApp:
             return
         point = self._pointer_target(event)
         if point is not None:
-            self._send({"t": "abs", "x": point[0], "y": point[1]})
+            self._send_input({"t": "abs", "x": point[0], "y": point[1]})
 
     def _on_press(self, event):
         self._button(event, True)
@@ -369,10 +377,10 @@ class ClientApp:
         if point is None:
             return
         if down:
-            self._send({"t": "abs", "x": point[0], "y": point[1]})
+            self._send_input({"t": "abs", "x": point[0], "y": point[1]})
         name = _BUTTONS.get(event.num)
         if name is not None:
-            self._send({"t": "button", "b": name, "down": down})
+            self._send_input({"t": "button", "b": name, "down": down})
 
     def _on_wheel(self, event):
         if not self._viewing:
@@ -381,7 +389,7 @@ class ClientApp:
         if steps == 0 and event.delta:
             steps = 1 if event.delta > 0 else -1
         if steps:
-            self._send({"t": "scroll", "dx": 0, "dy": steps})
+            self._send_input({"t": "scroll", "dx": 0, "dy": steps})
         return "break"
 
     def _on_key(self, spec: dict, down: bool) -> None:
@@ -389,22 +397,57 @@ class ClientApp:
         if action == "unlock":
             self.root.after(0, lambda: self._end_forwarding(notify_remote=True, disconnect=False))
             return
+        if action == "chrome":
+            self.root.after(0, self._toggle_chrome)
+            return
         if action == "disconnect":
             self.root.after(0, lambda: self._end_forwarding(notify_remote=False, disconnect=True))
             return
-        self._send({"t": "key", "kind": spec["kind"], "v": spec["v"], "down": down})
+        self._send_input({"t": "key", "kind": spec["kind"], "v": spec["v"], "down": down})
 
     def _send(self, message: dict) -> None:
+        self._transmit(message, queued=False)
+
+    def _send_input(self, message: dict) -> None:
+        self._transmit(message, queued=True)
+
+    def _transmit(self, message: dict, queued: bool) -> None:
         session = self.session
         if session is None:
             return
         try:
-            session.send(message)
+            if queued:
+                session.send_input(message)
+            else:
+                session.send(message)
         except Exception:
             try:
                 self.root.after(0, self._on_remote_closed)
             except tk.TclError:
                 pass
+
+    def _toggle_chrome(self, _event=None):
+        if not self._viewing or self._closed:
+            return "break"
+        try:
+            if self._chrome_visible:
+                self.bar.pack_forget()
+                self.root.overrideredirect(True)
+                width = self.root.winfo_screenwidth()
+                height = self.root.winfo_screenheight()
+                self.root.geometry(f"{width}x{height}+0+0")
+                self._chrome_visible = False
+            else:
+                self.root.overrideredirect(False)
+                if not self.bar.winfo_manager():
+                    self.bar.pack(fill="x", before=self.canvas)
+                self._fill_screen()
+                self._chrome_visible = True
+                self.view_status.set("已显示标题栏和工具条。Ctrl+Alt+H 再次隐藏。")
+            self.canvas.focus_set()
+        except tk.TclError:
+            pass
+        return "break"
 
     def _send_file(self) -> None:
         if self.session is None:
@@ -497,8 +540,12 @@ class ClientApp:
             self.root.unbind("<Escape>")
             self.root.unbind("<Control-Alt-q>")
             self.root.unbind("<Control-Alt-Q>")
+            self.root.unbind("<Control-Alt-h>")
+            self.root.unbind("<Control-Alt-H>")
             self.root.unbind("<Unmap>")
+            self._chrome_visible = True
             try:
+                self.root.overrideredirect(False)
                 self.root.state("normal")
             except tk.TclError:
                 pass
@@ -524,6 +571,17 @@ class ClientApp:
             self.primary.configure(state="normal")
             for entry in self.entries:
                 entry.state(["!disabled"])
+
+
+def _paste_frame(base, image, geometry):
+    crop = geometry.crop
+    if crop is None:
+        return image
+    if base is None or base.size != (geometry.image_w, geometry.image_h):
+        return None
+    merged = base.copy()
+    merged.paste(image, (crop[0], crop[1]))
+    return merged
 
 
 def run() -> None:

@@ -3,7 +3,17 @@ import pathfix  # noqa: F401
 import unittest
 from pathlib import Path
 
-from pack.build_exe import TARGETS, is_blocked_binary, is_conda_prefix, pyinstaller_args, spec_source, tk_binaries
+from datetime import datetime
+
+from pack.build_exe import (
+    TARGETS,
+    is_blocked_binary,
+    is_conda_prefix,
+    output_name,
+    pyinstaller_args,
+    spec_source,
+    tk_binaries,
+)
 from pack.support import RUNTIME_DLLS, imported_dll_names
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +65,9 @@ class PackScriptTests(unittest.TestCase):
                 self.assertIn("zlib1.dll", lower)
                 self.assertNotIn("miniconda", lower)
             self.assertIn("rthook_dll.py", source)
+        stamped = output_name("client", datetime(2026, 10, 30, 9, 49, 12))
+        self.assertEqual(stamped, "局域网键鼠控制端-20261030-094912")
+        self.assertIn(stamped, spec_source("client", ROOT, stamped))
         self.assertTrue(is_conda_prefix(r"C:\Users\user\miniconda3"))
         self.assertFalse(is_conda_prefix(str(ROOT / "build" / "cpython")))
         names = [item.lower() for item in imported_dll_names(Path(__import__("_tkinter").__file__))]

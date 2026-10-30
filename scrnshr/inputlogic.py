@@ -7,11 +7,12 @@ _ALT_NAMES = frozenset({"alt", "alt_l", "alt_r", "alt_gr"})
 _CTRL_VK = frozenset({0x11, 0xA2, 0xA3})
 _ALT_VK = frozenset({0x12, 0xA4, 0xA5})
 _VK_Q = 0x51
+_VK_H = 0x48
 _VK_ESCAPE = 0x1B
 
 
 class ForwardPolicy:
-    """Ctrl+Alt+Q 断开，Esc 只释放光标。这两个组合本身不转发出去。"""
+    """Ctrl+Alt+Q 断开，Ctrl+Alt+H 切换本机窗口边框，Esc 只释放光标。这些组合本身不转发出去。"""
 
     def __init__(self) -> None:
         self._ctrl = 0
@@ -21,6 +22,8 @@ class ForwardPolicy:
         self._track(spec, down)
         if down and _is_escape(spec):
             return "unlock"
+        if down and self._ctrl > 0 and self._alt > 0 and _is_h(spec):
+            return "chrome"
         if down and self._ctrl > 0 and self._alt > 0 and _is_q(spec):
             return "disconnect"
         return "forward"
@@ -86,6 +89,12 @@ def _is_escape(spec: dict) -> bool:
     return (spec.get("kind") == "key" and spec.get("v") == "esc") or (
         spec.get("kind") == "vk" and spec.get("v") == _VK_ESCAPE
     )
+
+
+def _is_h(spec: dict) -> bool:
+    if spec.get("kind") == "char" and isinstance(spec.get("v"), str) and spec["v"].lower() == "h":
+        return True
+    return spec.get("kind") == "vk" and spec.get("v") == _VK_H
 
 
 def _is_q(spec: dict) -> bool:

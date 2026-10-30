@@ -9,7 +9,7 @@ import threading
 from scrnshr.auth import new_nonce, verify
 from scrnshr.errors import AuthError, BindError, ConnectionClosed, ProtocolError
 from scrnshr.netutil import DEFAULT_PORT, enable_tcp_keepalive, peer_block_reason
-from scrnshr.protocol import PROTOCOL_VERSION, read_one, send_msg
+from scrnshr.protocol import PROTOCOL_VERSION, pack, pack_screen, read_one, send_msg
 
 BUTTONS = frozenset({"left", "right", "middle"})
 CHANNEL_TYPES = frozenset({"clipboard", "file_begin", "file_chunk", "file_end", "file_abort"})
@@ -64,11 +64,20 @@ class HostServer:
         if conn is None:
             return False
         with self._send_lock:
-            try:
-                send_msg(conn, message)
-                return True
-            except OSError:
-                return False
+            return _write(conn, message)
+
+    def try_send(self, message: dict) -> bool:
+        """画面用。锁被键鼠或文件占用时直接丢掉这一帧，不排队。"""
+        with self._lock:
+            conn = self._client if self._authed else None
+        if conn is None:
+            return False
+        if not self._send_lock.acquire(blocking=False):
+            return False
+        try:
+            return _write(conn, message)
+        finally:
+            self._send_lock.release()
 
     def set_password(self, password: str) -> None:
         if not password:
@@ -303,6 +312,20 @@ def _key_spec(message: dict) -> dict:
             raise ProtocolError("虚拟键不正确")
         return {"kind": "vk", "v": value}
     raise ProtocolError("按键类型不正确")
+
+
+def _outbound(message: dict) -> bytes:
+    if message.get("bin"):
+        return pack_screen(message)
+    return pack(message)
+
+
+def _write(conn: socket.socket, message: dict) -> bool:
+    try:
+        conn.sendall(_outbound(message))
+        return True
+    except OSError:
+        return False
 
 
 def _close_socket(sock: socket.socket) -> None:

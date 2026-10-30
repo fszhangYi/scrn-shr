@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,8 @@ _SHARED_HIDDEN = (
     "PIL._tkinter_finder",
     "PIL.ImageGrab",
     "PIL.ImageTk",
+    "mss",
+    "mss.windows",
 )
 
 TARGETS = {
@@ -98,9 +101,16 @@ def tk_binaries() -> list[str]:
     return collected
 
 
-def spec_source(kind: str, root: Path | None = None) -> str:
+def output_name(kind: str, moment: datetime | None = None) -> str:
+    """打包产物带本地时间，避免新程序覆盖正在运行的旧 exe。"""
+    moment = datetime.now() if moment is None else moment
+    return f"{TARGETS[kind]['name']}-{moment.strftime('%Y%m%d-%H%M%S')}"
+
+
+def spec_source(kind: str, root: Path | None = None, exe_name: str | None = None) -> str:
     target = TARGETS[kind]
     root = ROOT if root is None else root
+    exe_name = exe_name or target["name"]
     entry = root / "pack" / target["entry"]
     icon = root / "build" / "icon.ico"
     binaries = [(path, ".") for path in tk_binaries()]
@@ -138,7 +148,7 @@ def spec_source(kind: str, root: Path | None = None) -> str:
         "    a.binaries,",
         "    a.datas,",
         "    [],",
-        f"    name={target['name']!r},",
+        f"    name={exe_name!r},",
         "    debug=False,",
         "    bootloader_ignore_signals=False,",
         "    strip=False,",
@@ -214,8 +224,9 @@ def build(kind: str) -> Path:
     _write_icon(icon)
     spec_dir = ROOT / "build"
     spec_dir.mkdir(parents=True, exist_ok=True)
-    spec = spec_dir / f"{TARGETS[kind]['name']}.spec"
-    spec.write_text(spec_source(kind), encoding="utf-8")
+    exe_name = output_name(kind)
+    spec = spec_dir / f"{exe_name}.spec"
+    spec.write_text(spec_source(kind, exe_name=exe_name), encoding="utf-8")
     from PyInstaller.__main__ import run
 
     run([
@@ -227,7 +238,7 @@ def build(kind: str) -> Path:
         str(ROOT / "build" / kind),
         str(spec),
     ])
-    output = ROOT / "dist" / f"{TARGETS[kind]['name']}.exe"
+    output = ROOT / "dist" / f"{exe_name}.exe"
     if not output.is_file():
         raise SystemExit(f"没有生成 {output}")
     print(f"已生成 {output}")

@@ -6,6 +6,7 @@ import io
 import threading
 from pathlib import Path
 
+from scrnshr.clipfiles import clipboard_sequence, collect_files, read_hdrop, write_hdrop
 from scrnshr.clipboard_sync import ClipboardSync
 from scrnshr.fileshare import IncomingFiles, OutgoingFile, default_receive_dir
 
@@ -21,12 +22,17 @@ class DesktopLink:
         self._ticks = 0
         self._sending = False
         self._after_id = None
+        self._file_seq = 0
 
     def start(self) -> None:
         self.sync.note_text(_read_text(self.root))
         image = _read_image()
         if image is not None:
             self.sync.note_image(image.width, image.height)
+        try:
+            self._file_seq = clipboard_sequence()
+        except Exception:
+            self._file_seq = 0
         self._polling = True
         self._schedule()
 
@@ -43,6 +49,9 @@ class DesktopLink:
                 self._on_status(note)
             return
         if kind != "clipboard":
+            return
+        if message.get("kind") == "files":
+            self._publish_copied_files()
             return
         applied = self.sync.apply(message)
         if applied is None:
@@ -66,22 +75,33 @@ class DesktopLink:
 
     def _send_worker(self, path: Path) -> None:
         try:
-            outgoing = OutgoingFile(path)
-            total = max(1, outgoing.size)
-            sent = 0
-            self._status(f"正在发送 {outgoing.name}")
-            for message in outgoing.messages():
-                if message["t"] == "file_chunk":
-                    import base64
-
-                    sent += len(base64.b64decode(message["data"]))
-                    self._status(f"正在发送 {outgoing.name} {min(100, int(sent * 100 / total))}%")
-                self._send(message)
-            self._status(f"已发送 {outgoing.name}")
-        except Exception as exc:
-            self._status(f"发送失败：{exc}")
+            self._send_many([path], clip=False)
         finally:
             self._sending = False
+
+    def _send_many(self, paths: list[Path], clip: bool) -> None:
+        try:
+            for path in paths:
+                outgoing = OutgoingFile(path)
+                total = max(1, outgoing.size)
+                sent = 0
+                self._status(f"正在发送 {outgoing.name}")
+                for message in outgoing.messages():
+                    if clip and message["t"] == "file_begin":
+                        message = {**message, "clip": True}
+                    if message["t"] == "file_chunk":
+                        import base64
+
+                        sent += len(base64.b64decode(message["data"]))
+                        self._status(f"正在发送 {outgoing.name} {min(100, int(sent * 100 / total))}%")
+                    self._send(message)
+            if clip:
+                self._send({"t": "clipboard", "kind": "files"})
+                self._status(f"已复制 {len(paths)} 个文件")
+            elif len(paths) == 1:
+                self._status(f"已发送 {paths[0].name}")
+        except Exception as exc:
+            self._status(f"发送失败：{exc}")
 
     def _cancel(self) -> None:
         after_id = self._after_id
@@ -104,6 +124,7 @@ class DesktopLink:
         if not self._polling:
             return
         try:
+            self._poll_copied_files()
             text_message = self.sync.consider_text(_read_text(self.root))
             if text_message is not None:
                 self._send(text_message)
@@ -119,6 +140,44 @@ class DesktopLink:
             pass
         if self._polling:
             self._schedule()
+
+    def _poll_copied_files(self) -> None:
+        try:
+            sequence = clipboard_sequence()
+        except Exception:
+            return
+        if sequence == self._file_seq:
+            return
+        if self._sending:
+            return
+        paths = read_hdrop()
+        self._file_seq = sequence
+        if not paths:
+            return
+        self._sending = True
+        threading.Thread(target=self._copy_paths, args=(paths,), name="scrnshr-copy", daemon=True).start()
+
+    def _copy_paths(self, paths) -> None:
+        try:
+            files, note = collect_files(paths)
+            if note:
+                self._status(note)
+            if files:
+                self._send_many(files, clip=True)
+        finally:
+            self._sending = False
+
+    def _publish_copied_files(self) -> None:
+        paths = [str(path) for path in self.files.take_clip_paths()]
+        if not paths:
+            return
+        try:
+            write_hdrop(paths)
+            self._file_seq = clipboard_sequence()
+        except Exception as exc:
+            self._on_status(f"文件已保存，但没有放进剪贴板：{exc}")
+            return
+        self._on_status(f"已收到 {len(paths)} 个文件，可以粘贴")
 
     def _status(self, text: str) -> None:
         try:

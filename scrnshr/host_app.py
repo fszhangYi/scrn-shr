@@ -17,7 +17,7 @@ from scrnshr.host_server import HostServer
 from scrnshr.inject import PynputInjector
 from scrnshr.netutil import DEFAULT_PORT, get_lan_ipv4s
 from scrnshr.scope import HOST_NOTES
-from scrnshr.screengrab import capture_message
+from scrnshr.screengrab import ScreenPump, capture_message
 from scrnshr.winutil import configure_root, enable_dpi_awareness, make_icon_image, place_window
 
 DENY_TEXT = {
@@ -351,20 +351,31 @@ class HostApp:
             ctypes.windll.ole32.CoInitialize(None)
         except Exception:
             pass
+        pump = ScreenPump()
         seq = 0
         reported = False
-        while not stop.is_set() and self._controlled:
-            seq += 1
-            started = time.perf_counter()
-            try:
-                self.server.send(capture_message(seq))
-            except Exception as exc:
-                if not reported:
-                    reported = True
-                    self._events.put(("detail", f"画面发送失败：{exc}"))
-            remaining = 0.12 - (time.perf_counter() - started)
-            if stop.wait(max(0.02, remaining)):
-                break
+        try:
+            while not stop.is_set() and self._controlled:
+                seq += 1
+                try:
+                    message = pump.prepare(seq)
+                except Exception as exc:
+                    if not reported:
+                        reported = True
+                        self._events.put(("detail", f"画面发送失败：{exc}"))
+                    try:
+                        self.server.try_send(capture_message(seq))
+                    except Exception:
+                        pass
+                    if stop.wait(0.2):
+                        break
+                    continue
+                if message is not None and self.server.try_send(message):
+                    pump.commit()
+                if stop.wait(0.02 if message is not None else 0.04):
+                    break
+        finally:
+            pump.close()
 
     def _quit_from_tray(self, _icon=None, _item=None) -> None:
         try:

@@ -3,7 +3,7 @@ import pathfix  # noqa: F401
 import unittest
 
 from scrnshr.errors import ProtocolError
-from scrnshr.protocol import pack, pop_message
+from scrnshr.protocol import pack, pack_screen, pop_message
 
 
 class ProtocolTests(unittest.TestCase):
@@ -11,6 +11,31 @@ class ProtocolTests(unittest.TestCase):
         message = {"t": "move", "dx": 3, "dy": -4}
         buffer = bytearray(pack(message))
         self.assertEqual(pop_message(buffer), message)
+        self.assertEqual(buffer, bytearray())
+
+    def test_screen_bytes_round_trip_without_base64(self):
+        message = {
+            "t": "screen",
+            "bin": True,
+            "seq": 4,
+            "ox": -8,
+            "oy": 0,
+            "sw": 64,
+            "sh": 48,
+            "w": 64,
+            "h": 48,
+            "cx": 0,
+            "cy": 0,
+            "cw": 16,
+            "ch": 16,
+            "jpg": b"\xff\xd8\xff\xd9",
+        }
+        buffer = bytearray(pack_screen(message))
+        restored = pop_message(buffer)
+        self.assertEqual(restored["t"], "screen")
+        self.assertEqual(restored["jpg"], message["jpg"])
+        self.assertEqual(restored["cx"], 0)
+        self.assertNotIn("bin", restored)
         self.assertEqual(buffer, bytearray())
 
     def test_partial_header_waits(self):
