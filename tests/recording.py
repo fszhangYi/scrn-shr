@@ -8,6 +8,9 @@ class RecordingInjector:
     def move(self, dx, dy) -> None:
         self.events.append(("move", dx, dy))
 
+    def move_abs(self, x, y) -> None:
+        self.events.append(("abs", x, y))
+
     def button(self, name, down) -> None:
         self.events.append(("button", name, down))
 

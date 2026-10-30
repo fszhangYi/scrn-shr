@@ -9,15 +9,12 @@ import threading
 from scrnshr.auth import new_nonce, verify
 from scrnshr.errors import AuthError, BindError, ConnectionClosed, ProtocolError
 from scrnshr.netutil import DEFAULT_PORT, enable_tcp_keepalive, peer_block_reason
-from scrnshr.protocol import (
-    DEFERRED_TYPES,
-    PROTOCOL_VERSION,
-    read_one,
-    send_msg,
-)
+from scrnshr.protocol import PROTOCOL_VERSION, read_one, send_msg
 
 BUTTONS = frozenset({"left", "right", "middle"})
+CHANNEL_TYPES = frozenset({"clipboard", "file_begin", "file_chunk", "file_end", "file_abort"})
 _COORD_LIMIT = 5000
+_ABS_LIMIT = 32000
 
 
 class HostServer:
@@ -45,8 +42,11 @@ class HostServer:
         self._worker: threading.Thread | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._authed = False
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self._on_status = None
+        self._on_channel = None
 
     @property
     def listening(self) -> bool:
@@ -54,6 +54,21 @@ class HostServer:
 
     def set_status_callback(self, callback) -> None:
         self._on_status = callback
+
+    def set_channel_callback(self, callback) -> None:
+        self._on_channel = callback
+
+    def send(self, message: dict) -> bool:
+        with self._lock:
+            conn = self._client if self._authed else None
+        if conn is None:
+            return False
+        with self._send_lock:
+            try:
+                send_msg(conn, message)
+                return True
+            except OSError:
+                return False
 
     def set_password(self, password: str) -> None:
         if not password:
@@ -89,11 +104,13 @@ class HostServer:
         self._running = False
         with self._lock:
             client = self._client
+            self._authed = False
         if client is not None:
-            try:
-                send_msg(client, {"t": "bye"})
-            except OSError:
-                pass
+            with self._send_lock:
+                try:
+                    send_msg(client, {"t": "bye"})
+                except OSError:
+                    pass
             _close_socket(client)
         if self._server is not None:
             _close_socket(self._server)
@@ -152,10 +169,11 @@ class HostServer:
             pass
         finally:
             self._safe_release()
-            _close_socket(conn)
             with self._lock:
+                self._authed = False
                 if self._client is conn:
                     self._client = None
+            _close_socket(conn)
             self._emit("waiting")
 
     def _session(self, conn: socket.socket, peer_ip: str) -> None:
@@ -176,6 +194,8 @@ class HostServer:
             raise AuthError("auth")
         send_msg(conn, {"t": "ok", "v": PROTOCOL_VERSION})
         conn.settimeout(None)
+        with self._lock:
+            self._authed = True
         self._emit("connected", peer_ip)
         while self._running:
             incoming = read_one(conn, buffer)
@@ -188,7 +208,11 @@ class HostServer:
         if kind == "release_all":
             self._safe_release()
             return
-        if kind in DEFERRED_TYPES:
+        if kind in CHANNEL_TYPES:
+            self._emit_channel(message)
+            return
+        if kind == "abs":
+            self.injector.move_abs(_abs_coord(message.get("x")), _abs_coord(message.get("y")))
             return
         if kind == "move":
             self.injector.move(_coord(message.get("dx")), _coord(message.get("dy")))
@@ -223,11 +247,28 @@ class HostServer:
         except Exception:
             pass
 
+    def _emit_channel(self, message: dict) -> None:
+        callback = self._on_channel
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception:
+            pass
+
     def _safe_release(self) -> None:
         try:
             self.injector.release_all()
         except Exception:
             pass
+
+
+def _abs_coord(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProtocolError("坐标不正确")
+    if not -_ABS_LIMIT <= value <= _ABS_LIMIT:
+        raise ProtocolError("坐标超出范围")
+    return value
 
 
 def _coord(value: object) -> int:

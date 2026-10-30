@@ -1,8 +1,4 @@
-"""长度前缀加 JSON 的小协议。
-
-一条消息只描述一次键盘或鼠标动作。画面、文件和剪贴板不走这里，
-单条消息也限制在 64KB，放不下这些内容。
-"""
+"""长度前缀加 JSON。键鼠、画面、文件分片和剪贴板都走这一条连接。"""
 
 from __future__ import annotations
 
@@ -13,8 +9,7 @@ import struct
 from scrnshr.errors import ConnectionClosed, ProtocolError
 
 PROTOCOL_VERSION = 1
-MAX_MESSAGE = 64 * 1024
-DEFERRED_TYPES = frozenset({"screen", "file", "clipboard"})
+MAX_MESSAGE = 4 * 1024 * 1024
 _HEADER = struct.Struct(">I")
 
 
@@ -55,7 +50,7 @@ def read_one(sock: socket.socket, buffer: bytearray) -> dict:
         if message is not None:
             return message
         try:
-            chunk = sock.recv(8192)
+            chunk = sock.recv(65536)
         except socket.timeout as exc:
             raise TimeoutError("等待对方响应超时") from exc
         if not chunk:

@@ -50,7 +50,7 @@ class ClientSession:
         self._buf = buffer
         self._closed = False
 
-    def start_watch(self, on_closed) -> None:
+    def start_watch(self, on_message, on_closed) -> None:
         sock = self._sock
         buffer = self._buf
 
@@ -63,6 +63,10 @@ class ClientSession:
                     message = read_one(sock, buffer)
                     if message.get("t") == "bye":
                         break
+                    try:
+                        on_message(message)
+                    except Exception:
+                        pass
             except (ConnectionClosed, ProtocolError, OSError, TimeoutError):
                 pass
             should_notify = False

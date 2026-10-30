@@ -78,18 +78,20 @@ class HostServerTests(unittest.TestCase):
         self.assertEqual(denied, {"t": "deny", "reason": "busy"})
         _quiet_close(first)
 
-    def test_deferred_messages_do_not_reach_the_injector(self):
+    def test_absolute_pointer_and_clipboard_channel(self):
+        received = []
+        self.server.set_channel_callback(received.append)
         sock, _buffer, _hello, reply = self._open()
         self.assertEqual(reply["t"], "ok")
-        before = len(self.injector.events)
-        for kind in ("screen", "file", "clipboard"):
-            send_msg(sock, {"t": kind, "payload": "ignored"})
+        send_msg(sock, {"t": "abs", "x": 12, "y": 34})
+        send_msg(sock, {"t": "clipboard", "kind": "text", "text": "你好"})
+        send_msg(sock, {"t": "screen", "jpg": "nope"})
         send_msg(sock, {"t": "move", "dx": 1, "dy": 1})
+        self.assertTrue(wait_for(lambda: ("abs", 12, 34) in self.injector.events))
+        self.assertTrue(wait_for(lambda: any(item.get("t") == "clipboard" for item in received)))
         self.assertTrue(wait_for(lambda: ("move", 1, 1) in self.injector.events))
-        kinds = [event[0] for event in self.injector.events[before:]]
+        kinds = [event[0] for event in self.injector.events]
         self.assertNotIn("screen", kinds)
-        self.assertNotIn("file", kinds)
-        self.assertNotIn("clipboard", kinds)
 
     def test_abrupt_disconnect_releases_keys(self):
         sock, _buffer, _hello, reply = self._open()
@@ -97,13 +99,13 @@ class HostServerTests(unittest.TestCase):
         send_msg(sock, {"t": "key", "kind": "key", "v": "shift", "down": True})
         self.assertTrue(wait_for(lambda: ("key", "key", "shift", True) in self.injector.events))
         _quiet_close(sock)
-        self.assertTrue(wait_for(lambda: self.injector.events[-1] == ("release_all",)))
+        self.assertTrue(wait_for(lambda: bool(self.injector.events) and self.injector.events[-1] == ("release_all",)))
 
     def test_malformed_key_drops_the_session(self):
         sock, _buffer, _hello, reply = self._open()
         self.assertEqual(reply["t"], "ok")
         send_msg(sock, {"t": "key", "kind": "char", "v": "ab", "down": True})
-        self.assertTrue(wait_for(lambda: self.injector.events[-1] == ("release_all",)))
+        self.assertTrue(wait_for(lambda: bool(self.injector.events) and self.injector.events[-1] == ("release_all",)))
 
     def test_move_before_auth_does_not_inject(self):
         sock = socket.create_connection(("127.0.0.1", self.server.port), timeout=2)

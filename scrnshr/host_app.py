@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import ctypes
 import queue
-import tkinter as tk
-from tkinter import ttk
 import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, ttk
 
 from scrnshr.auth import new_pin
+from scrnshr.desktop_link import DesktopLink
 from scrnshr.errors import BindError
 from scrnshr.host_server import HostServer
 from scrnshr.inject import PynputInjector
 from scrnshr.netutil import DEFAULT_PORT, get_lan_ipv4s
 from scrnshr.scope import HOST_NOTES
+from scrnshr.screengrab import capture_message
 from scrnshr.winutil import configure_root, enable_dpi_awareness, make_icon_image, place_window
 
 DENY_TEXT = {
@@ -32,6 +37,9 @@ class HostApp:
         self.addresses: list[str] = []
         self._events: queue.Queue = queue.Queue()
         self.icon = None
+        self._share_stop = threading.Event()
+        self._share_stop.set()
+        self._poll_after = None
 
         self.root = tk.Tk()
         configure_root(self.root)
@@ -61,13 +69,15 @@ class HostApp:
             bind_host=bind_host,
         )
         self.server.set_status_callback(lambda *payload: self._events.put(payload))
+        self.server.set_channel_callback(lambda message: self._events.put(("channel", message)))
+        self.link = DesktopLink(self.root, self._send_remote, self._link_status)
         try:
             self.server.start()
         except BindError as exc:
             self.detail_var.set(str(exc))
         self._start_tray()
         self._load_addresses()
-        self.root.after(150, self._poll)
+        self._poll_after = self.root.after(150, self._poll)
 
     def _build(self) -> None:
         frame = ttk.Frame(self.root, padding=16)
@@ -99,6 +109,7 @@ class HostApp:
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="刷新地址", command=self._load_addresses).pack(side="left")
+        ttk.Button(buttons, text="发送文件", command=self._send_file).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="停止并退出", command=self.shutdown).pack(side="right")
 
         ttk.Label(frame, text="\n".join(HOST_NOTES), wraplength=410, justify="left").pack(anchor="w", pady=(18, 0))
@@ -110,6 +121,12 @@ class HostApp:
         if self._closed:
             return
         self._closed = True
+        self._cancel_poll()
+        self._stop_share()
+        try:
+            self.link.stop()
+        except Exception:
+            pass
         try:
             self.server.stop()
         except Exception:
@@ -199,7 +216,18 @@ class HostApp:
         self.server.set_password(pin)
         self.detail_var.set("已更换密码。请把新密码告诉控制端。")
 
+    def _cancel_poll(self) -> None:
+        after_id = self._poll_after
+        self._poll_after = None
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except tk.TclError:
+            pass
+
     def _poll(self) -> None:
+        self._poll_after = None
         if self._closed:
             return
         while True:
@@ -208,21 +236,32 @@ class HostApp:
             except queue.Empty:
                 break
             self._apply_status(payload)
-        self.root.after(150, self._poll)
+        try:
+            self._poll_after = self.root.after(150, self._poll)
+        except tk.TclError:
+            pass
 
     def _apply_status(self, payload) -> None:
         kind = payload[0]
         if kind == "waiting":
             self._controlled = False
+            self._stop_share()
+            self.link.stop()
             self.state_var.set("等待连接")
             self.regen.state(["!disabled"])
         elif kind == "connected":
             self._controlled = True
             self.state_var.set(f"正在被 {payload[1]} 控制")
-            self.detail_var.set("对方正在操作这台电脑的键盘和鼠标。")
+            self.detail_var.set("对方可以看到这台电脑的画面，并操作键盘和鼠标。")
             self.regen.state(["disabled"])
+            self.link.start()
+            self._start_share()
         elif kind == "denied":
             self.detail_var.set(DENY_TEXT.get(payload[1], "已拒绝一次连接。"))
+        elif kind == "channel":
+            self.link.handle(payload[1])
+        elif kind == "detail":
+            self.detail_var.set(payload[1])
         self._update_tooltip()
 
     def _start_tray(self) -> None:
@@ -281,6 +320,51 @@ class HostApp:
             self.icon.title = title
         except Exception:
             pass
+
+    def _send_remote(self, message: dict) -> None:
+        if not self.server.send(message):
+            raise ConnectionError("连接已断开")
+
+    def _link_status(self, text: str) -> None:
+        if not self._closed:
+            self.detail_var.set(text)
+
+    def _send_file(self) -> None:
+        if not self._controlled:
+            self.detail_var.set("还没有控制端连接。")
+            return
+        selected = filedialog.askopenfilename(parent=self.root, title="发送文件给控制端")
+        if selected:
+            self.link.send_path(Path(selected))
+
+    def _start_share(self) -> None:
+        self._stop_share()
+        stop = threading.Event()
+        self._share_stop = stop
+        threading.Thread(target=self._share_loop, args=(stop,), name="scrnshr-screen", daemon=True).start()
+
+    def _stop_share(self) -> None:
+        self._share_stop.set()
+
+    def _share_loop(self, stop: threading.Event) -> None:
+        try:
+            ctypes.windll.ole32.CoInitialize(None)
+        except Exception:
+            pass
+        seq = 0
+        reported = False
+        while not stop.is_set() and self._controlled:
+            seq += 1
+            started = time.perf_counter()
+            try:
+                self.server.send(capture_message(seq))
+            except Exception as exc:
+                if not reported:
+                    reported = True
+                    self._events.put(("detail", f"画面发送失败：{exc}"))
+            remaining = 0.12 - (time.perf_counter() - started)
+            if stop.wait(max(0.02, remaining)):
+                break
 
     def _quit_from_tray(self, _icon=None, _item=None) -> None:
         try:

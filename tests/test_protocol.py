@@ -3,7 +3,7 @@ import pathfix  # noqa: F401
 import unittest
 
 from scrnshr.errors import ProtocolError
-from scrnshr.protocol import DEFERRED_TYPES, pack, pop_message
+from scrnshr.protocol import pack, pop_message
 
 
 class ProtocolTests(unittest.TestCase):
@@ -40,8 +40,11 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             pop_message(buffer)
 
-    def test_deferred_names_stay_out_of_band(self):
-        self.assertEqual(DEFERRED_TYPES, frozenset({"screen", "file", "clipboard"}))
+    def test_screen_payload_round_trip(self):
+        message = {"t": "screen", "jpg": "a" * (200 * 1024)}
+        restored = pop_message(bytearray(pack(message)))
+        self.assertEqual(restored["t"], "screen")
+        self.assertEqual(len(restored["jpg"]), 200 * 1024)
 
 
 if __name__ == "__main__":

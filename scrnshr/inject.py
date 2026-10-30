@@ -41,6 +41,12 @@ class PynputInjector:
         except Exception:
             return
 
+    def move_abs(self, x: int, y: int) -> None:
+        try:
+            self._mouse.position = (int(x), int(y))
+        except Exception:
+            return
+
     def button(self, name: str, down: bool) -> None:
         button = _button(name)
         if button is None:

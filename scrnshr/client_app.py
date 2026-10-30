@@ -1,16 +1,19 @@
-"""控制端窗口。连接后锁定本机光标，把键盘和鼠标发给被控端。"""
+"""控制端窗口。连接后显示对方画面，并转发键盘、鼠标、文件和剪贴板。"""
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk
 import threading
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, ttk
 
-from scrnshr.capture import KeyHook, clip_cursor, release_cursor_clip, set_cursor_pos
+from scrnshr.capture import KeyHook, release_cursor_clip
 from scrnshr.client_session import ClientSession
-from scrnshr.inputlogic import ForwardPolicy, PointerLockMath
+from scrnshr.desktop_link import DesktopLink
+from scrnshr.inputlogic import ForwardPolicy
 from scrnshr.netutil import DEFAULT_PORT, get_lan_ipv4s, parse_port, prepare_target
-from scrnshr.scope import CLIENT_NOTES, DEFERRED_SENTENCE
+from scrnshr.scope import CLIENT_NOTES
+from scrnshr.viewport import decode_screen, map_canvas_filled, map_canvas_to_screen
 from scrnshr.winutil import configure_root, enable_dpi_awareness, make_icon_image, place_window
 
 _BUTTONS = {1: "left", 2: "middle", 3: "right"}
@@ -21,13 +24,17 @@ class ClientApp:
         enable_dpi_awareness()
         self._closed = False
         self._locked = False
-        self._engage_tries = 0
-        self._disarmed_recenters = 0
+        self._viewing = False
+        self._view_gen = 0
         self.session: ClientSession | None = None
         self.peer: tuple[str, int] | None = None
         self._hook: KeyHook | None = None
         self.policy = ForwardPolicy()
-        self.pointer = PointerLockMath()
+        self._geo = None
+        self._remote_image = None
+        self._photo = None
+        self._pending = None
+        self._frame_after = None
 
         self.root = tk.Tk()
         configure_root(self.root)
@@ -48,7 +55,9 @@ class ClientApp:
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
         self.password_var = tk.StringVar()
         self.status = tk.StringVar(value="未连接")
+        self.view_status = tk.StringVar(value="正在接收画面…")
         self._build()
+        self.link = DesktopLink(self.root, self._send, self._link_status)
 
     def _build(self) -> None:
         self.form = ttk.Frame(self.root, padding=16)
@@ -72,7 +81,15 @@ class ClientApp:
         ttk.Label(self.form, text="\n".join(CLIENT_NOTES), wraplength=420, justify="left").pack(anchor="w")
 
         self.capture = tk.Frame(self.root, bg="#1e2933")
-        self.canvas = tk.Canvas(self.capture, bg="#1e2933", highlightthickness=0, cursor="crosshair")
+        bar = ttk.Frame(self.capture, padding=(8, 6))
+        bar.pack(fill="x")
+        self.key_button = ttk.Button(bar, text="使用本机键盘", command=self._toggle_keys)
+        self.key_button.pack(side="left")
+        ttk.Button(bar, text="发送文件", command=self._send_file).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="断开", command=self._disconnect).pack(side="right")
+        ttk.Label(bar, textvariable=self.view_status).pack(side="left", padx=12)
+
+        self.canvas = tk.Canvas(self.capture, bg="#1e2933", highlightthickness=0, cursor="arrow")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<ButtonPress>", self._on_press)
@@ -94,8 +111,15 @@ class ClientApp:
         if self._closed:
             return
         self._closed = True
+        self._view_gen += 1
+        self._cancel_frame()
         self._locked = False
+        self._viewing = False
         self._release_local_capture()
+        try:
+            self.link.stop()
+        except Exception:
+            pass
         session = self.session
         self.session = None
         if session is not None:
@@ -143,147 +167,192 @@ class ClientApp:
         if self._closed:
             session.close()
             return
+        self._view_gen += 1
+        generation = self._view_gen
         self.session = session
         self.peer = (ip, port)
+        self._geo = None
+        self._remote_image = None
+        self._pending = None
         self._set_busy(False)
 
-        def notify() -> None:
+        def closed() -> None:
             try:
                 self.root.after(0, self._on_remote_closed)
             except tk.TclError:
                 pass
 
-        session.start_watch(notify)
+        session.start_watch(self._on_network, closed)
+        self.link.start()
         self._lock()
+        self._schedule_frame(generation)
+
+    def _on_network(self, message: dict) -> None:
+        if message.get("t") == "screen":
+            try:
+                image, geometry = decode_screen(message)
+            except Exception:
+                return
+            self._pending = (image, geometry)
+            return
+        try:
+            self.root.after(0, lambda current=message: self._deliver_channel(current))
+        except tk.TclError:
+            pass
+
+    def _deliver_channel(self, message: dict) -> None:
+        if self._closed or self.session is None:
+            return
+        self.link.handle(message)
+
+    def _pull_frame(self, generation: int) -> None:
+        self._frame_after = None
+        if generation != self._view_gen or self._closed or self.session is None:
+            return
+        pending = self._pending
+        self._pending = None
+        if pending is not None:
+            self._remote_image, self._geo = pending
+            self._redraw()
+        self._schedule_frame(generation)
+
+    def _cancel_frame(self) -> None:
+        after_id = self._frame_after
+        self._frame_after = None
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except tk.TclError:
+            pass
+
+    def _schedule_frame(self, generation: int) -> None:
+        try:
+            self._frame_after = self.root.after(50, lambda: self._pull_frame(generation))
+        except tk.TclError:
+            pass
 
     def _lock(self) -> None:
         if self.session is None or self._closed:
             return
+        self._show_capture()
+        if self._hook is not None:
+            return
         self.policy = ForwardPolicy()
-        self.pointer = PointerLockMath()
         try:
             self._hook = KeyHook(self._on_key)
             self._hook.start()
         except Exception as exc:
             self._hook = None
-            self.status.set(f"无法捕获键盘：{exc}")
-            self._show_unlocked()
+            self._locked = False
+            self.view_status.set(f"画面可用，键盘捕获失败：{exc}")
+            self.key_button.configure(text="控制对方键盘")
             return
         self._locked = True
-        self._engage_tries = 0
-        self._disarmed_recenters = 0
-        self._show_capture()
-        self.root.after(40, self._engage_pointer)
+        self.view_status.set("正在转发键盘和鼠标。最小化或点「使用本机键盘」可交还键盘。")
+        self.key_button.configure(text="使用本机键盘")
+
+    def _toggle_keys(self) -> None:
+        if self._locked:
+            self._end_forwarding(notify_remote=True, disconnect=False)
+        else:
+            self._lock()
 
     def _show_capture(self) -> None:
+        first = not self._viewing
+        self._viewing = True
         self.form.pack_forget()
         self.capture.pack(fill="both", expand=True)
-        self.root.minsize(640, 420)
-        place_window(self.root, 720, 480)
-        try:
-            self.root.attributes("-topmost", True)
-        except tk.TclError:
-            pass
-        self._draw_hint()
+        if first:
+            self.root.minsize(720, 480)
+            self._fill_screen()
+            self._draw_waiting()
         self.root.bind("<Escape>", self._escape_backup)
         self.root.bind("<Control-Alt-q>", self._disconnect_backup)
         self.root.bind("<Control-Alt-Q>", self._disconnect_backup)
+        self.root.bind("<Unmap>", self._on_unmap)
+        try:
+            self.canvas.focus_set()
+        except tk.TclError:
+            pass
 
-    def _engage_pointer(self) -> None:
-        if not self._locked:
-            return
-        self.canvas.update_idletasks()
-        width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
-        if width < 40 or height < 40:
-            self._engage_tries += 1
-            if self._engage_tries < 20:
-                self.root.after(50, self._engage_pointer)
-                return
-            self._end_forwarding(notify_remote=True, disconnect=False)
-            self.status.set("控制窗口没有显示出来，已停止转发。")
+    def _fill_screen(self) -> None:
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            place_window(self.root, self.root.winfo_screenwidth() - 20, self.root.winfo_screenheight() - 60)
+
+    def _on_unmap(self, event) -> None:
+        if event.widget is not self.root:
             return
         try:
-            self._warp_and_clip()
-        except OSError as exc:
-            self._end_forwarding(notify_remote=True, disconnect=False)
-            self.status.set(str(exc))
+            self.root.after(80, self._release_if_minimized)
+        except tk.TclError:
+            pass
+
+    def _release_if_minimized(self) -> None:
+        if self._closed or not self._locked:
             return
-        self.canvas.focus_set()
-        self.root.after(150, self._arm_pointer)
+        try:
+            minimized = self.root.state() == "iconic"
+        except tk.TclError:
+            return
+        if minimized:
+            self._end_forwarding(notify_remote=True, disconnect=False)
 
-    def _arm_pointer(self) -> None:
-        if self._locked:
-            self.pointer.arm()
-
-    def _warp_and_clip(self) -> None:
-        left = self.canvas.winfo_rootx()
-        top = self.canvas.winfo_rooty()
-        width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
-        clip_cursor(left, top, left + width, top + height)
-        set_cursor_pos(left + width // 2, top + height // 2)
-
-    def _draw_hint(self) -> None:
+    def _draw_waiting(self) -> None:
         self.canvas.delete("all")
-        peer = self.peer or ("", 0)
-        text = (
-            f"正在把键盘和鼠标转发到 {peer[0]}:{peer[1]}\n\n"
-            "光标已锁定在这个窗口里。\n"
-            "Esc            释放光标，回到本机操作\n"
-            "Ctrl+Alt+Q     断开连接\n\n"
-            f"{DEFERRED_SENTENCE}"
-        )
         width = max(self.canvas.winfo_width(), 200)
         height = max(self.canvas.winfo_height(), 200)
         self.canvas.create_text(
             width / 2,
             height / 2,
-            text=text,
+            text="正在接收对方画面…\n\n在画面上移动和点击即可操作对方。\n最小化或点「使用本机键盘」交还键盘，Ctrl+Alt+Q 断开。",
             fill="white",
             font=("Microsoft YaHei UI", 14),
             justify="center",
-            width=width - 48,
         )
 
+    def _redraw(self) -> None:
+        if not self._viewing or self._remote_image is None:
+            return
+        width = max(self.canvas.winfo_width(), 1)
+        height = max(self.canvas.winfo_height(), 1)
+        from PIL import Image, ImageTk
+
+        if (width, height) == self._remote_image.size:
+            shown = self._remote_image
+        else:
+            shown = self._remote_image.resize((width, height), Image.Resampling.LANCZOS)
+        self._photo = ImageTk.PhotoImage(shown)
+        self.canvas.delete("all")
+        self.canvas.create_image(width / 2, height / 2, image=self._photo)
+
     def _on_canvas_configure(self, event) -> None:
-        if not self._locked or event.widget is not self.canvas or event.width < 40 or event.height < 40:
+        if not self._viewing or event.widget is not self.canvas or event.width < 40 or event.height < 40:
             return
-        self._draw_hint()
-        try:
-            self._warp_and_clip()
-        except OSError:
-            return
+        if self._remote_image is None:
+            self._draw_waiting()
+        else:
+            self._redraw()
+
+    def _pointer_target(self, event):
+        if self._geo is None:
+            return None
+        return map_canvas_filled(
+            event.x,
+            event.y,
+            event.widget.winfo_width(),
+            event.widget.winfo_height(),
+            self._geo,
+        )
 
     def _on_motion(self, event) -> None:
-        if not self._locked or event.widget is not self.canvas:
+        if not self._viewing or self.session is None:
             return
-        if self.canvas.winfo_width() < 40:
-            return
-        delta = self.pointer.on_move(event.x, event.y, event.widget.winfo_width(), event.widget.winfo_height())
-        if delta is not None:
-            self._send({"t": "move", "dx": delta[0], "dy": delta[1]})
-            self._try_recenter()
-            return
-        if self.pointer.armed:
-            return
-        self._disarmed_recenters += 1
-        if self._disarmed_recenters > 8:
-            self.pointer.arm()
-            return
-        self._try_recenter()
-
-    def _try_recenter(self) -> None:
-        try:
-            self._recenter()
-        except OSError as exc:
-            self._end_forwarding(notify_remote=True, disconnect=False)
-            self.status.set(str(exc))
-
-    def _recenter(self) -> None:
-        left = self.canvas.winfo_rootx()
-        top = self.canvas.winfo_rooty()
-        set_cursor_pos(left + self.canvas.winfo_width() // 2, top + self.canvas.winfo_height() // 2)
+        point = self._pointer_target(event)
+        if point is not None:
+            self._send({"t": "abs", "x": point[0], "y": point[1]})
 
     def _on_press(self, event):
         self._button(event, True)
@@ -294,15 +363,19 @@ class ClientApp:
         return "break"
 
     def _button(self, event, down: bool) -> None:
-        if not self._locked:
+        if not self._viewing or self.session is None:
             return
+        point = self._pointer_target(event)
+        if point is None:
+            return
+        if down:
+            self._send({"t": "abs", "x": point[0], "y": point[1]})
         name = _BUTTONS.get(event.num)
-        if name is None:
-            return
-        self._send({"t": "button", "b": name, "down": down})
+        if name is not None:
+            self._send({"t": "button", "b": name, "down": down})
 
     def _on_wheel(self, event):
-        if not self._locked:
+        if not self._viewing:
             return "break"
         steps = int(event.delta / 120) if event.delta else 0
         if steps == 0 and event.delta:
@@ -333,6 +406,23 @@ class ClientApp:
             except tk.TclError:
                 pass
 
+    def _send_file(self) -> None:
+        if self.session is None:
+            return
+        if self._locked:
+            self._end_forwarding(notify_remote=True, disconnect=False)
+        selected = filedialog.askopenfilename(parent=self.root, title="发送文件给被控端")
+        if selected:
+            self.link.send_path(Path(selected))
+
+    def _link_status(self, text: str) -> None:
+        if self._closed:
+            return
+        if self._viewing:
+            self.view_status.set(text)
+        else:
+            self.status.set(text)
+
     def _escape_backup(self, _event=None):
         if self._locked:
             self._end_forwarding(notify_remote=True, disconnect=False)
@@ -355,14 +445,25 @@ class ClientApp:
         if disconnect:
             self._disconnect()
         elif was_locked and not self._closed:
-            self._show_unlocked()
+            self.view_status.set("键盘已交还这台电脑。鼠标仍可在画面上操作。")
+            self.key_button.configure(text="控制对方键盘")
 
     def _disconnect(self) -> None:
+        self._view_gen += 1
+        self._cancel_frame()
         self._locked = False
+        self._viewing = False
         self._release_local_capture()
+        try:
+            self.link.stop()
+        except Exception:
+            pass
         session = self.session
         self.session = None
         self.peer = None
+        self._geo = None
+        self._remote_image = None
+        self._pending = None
         if session is not None:
             session.close()
         self._show_idle()
@@ -370,17 +471,11 @@ class ClientApp:
             self.status.set("已断开。")
 
     def _on_remote_closed(self) -> None:
-        if self._closed or (self.session is None and not self._locked):
+        if self._closed or (self.session is None and not self._locked and not self._viewing):
             return
-        self._locked = False
-        self._release_local_capture()
-        session = self.session
-        self.session = None
-        self.peer = None
-        if session is not None:
-            session.close()
-        self._show_idle()
-        self.status.set("对方已断开。")
+        self._disconnect()
+        if not self._closed:
+            self.status.set("对方已断开。")
 
     def _release_local_capture(self) -> None:
         hook = self._hook
@@ -394,20 +489,19 @@ class ClientApp:
             release_cursor_clip()
         except Exception:
             pass
-        if self._closed:
-            return
-        try:
-            self.root.attributes("-topmost", False)
-            self.root.unbind("<Escape>")
-            self.root.unbind("<Control-Alt-q>")
-            self.root.unbind("<Control-Alt-Q>")
-        except tk.TclError:
-            pass
 
     def _show_idle(self) -> None:
         if self._closed:
             return
         try:
+            self.root.unbind("<Escape>")
+            self.root.unbind("<Control-Alt-q>")
+            self.root.unbind("<Control-Alt-Q>")
+            self.root.unbind("<Unmap>")
+            try:
+                self.root.state("normal")
+            except tk.TclError:
+                pass
             self.capture.pack_forget()
             self.form.pack(fill="both", expand=True)
             self.root.minsize(460, 420)
@@ -415,22 +509,6 @@ class ClientApp:
                 entry.state(["!disabled"])
             self.primary.configure(text="连接", command=self._connect, state="normal")
             self.secondary.pack_forget()
-            self.root.attributes("-topmost", False)
-        except tk.TclError:
-            pass
-
-    def _show_unlocked(self) -> None:
-        if self._closed:
-            return
-        self._show_idle()
-        if self.peer is None:
-            return
-        try:
-            for entry in self.entries:
-                entry.state(["disabled"])
-            self.primary.configure(text="继续转发", command=self._lock, state="normal")
-            self.secondary.pack(side="right", padx=(0, 6))
-            self.status.set(f"已连接 {self.peer[0]}:{self.peer[1]}。光标已释放，本机可以正常操作。")
         except tk.TclError:
             pass
 

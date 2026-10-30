@@ -3,11 +3,14 @@ import pathfix  # noqa: F401
 import time
 import unittest
 
+from PIL import Image
+
 from recording import RecordingInjector
 
 from scrnshr.client_session import ClientSession
 from scrnshr.errors import AuthError, BusyError, LanError
 from scrnshr.host_server import HostServer
+from scrnshr.viewport import decode_screen, encode_screen
 
 
 def wait_for(predicate, timeout=3.0) -> bool:
@@ -58,6 +61,23 @@ class ClientSessionTests(unittest.TestCase):
         second = ClientSession()
         with self.assertRaises(BusyError):
             second.connect("127.0.0.1", self.server.port, "123456")
+
+    def test_screen_frame_reaches_the_controller(self):
+        session = ClientSession()
+        session.connect("127.0.0.1", self.server.port, "123456")
+        self.addCleanup(session.close)
+        received = []
+
+        def on_message(message):
+            received.append(message)
+
+        session.start_watch(on_message, lambda: received.append({"t": "closed"}))
+        image = Image.new("RGB", (80, 40), (10, 20, 30))
+        self.assertTrue(self.server.send(encode_screen(image, 0, 0, 80, 40, 7)))
+        self.assertTrue(wait_for(lambda: any(item.get("t") == "screen" for item in received)))
+        restored, geometry = decode_screen(next(item for item in received if item["t"] == "screen"))
+        self.assertEqual(restored.size, (80, 40))
+        self.assertEqual(geometry.screen_w, 80)
 
 
 if __name__ == "__main__":
